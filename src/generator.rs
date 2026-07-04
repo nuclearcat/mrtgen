@@ -604,6 +604,14 @@ fn emit_skip(b: &mut Builder) {
             json!({"reason": "attr_wrong_fixed_size", "attr_code": code, "encoded_len": encoded_len, "required_len": required_len}),
         );
     }
+    let ts = b.next_timestamp();
+    b.push(
+        invalid::bgp4mp_duplicate_origin_bad_len(ts),
+        "invalid_attr_duplicate_origin_len4",
+        Expect::Skip,
+        "UPDATE carries a valid ORIGIN followed by a second ORIGIN encoded with length 4",
+        json!({"reason": "duplicate_attribute_and_attr_wrong_fixed_size", "attr_code": ATTR_ORIGIN, "encoded_len": 4, "required_len": 1}),
+    );
 
     // TLV length that overruns its container.
     let ts = b.next_timestamp();

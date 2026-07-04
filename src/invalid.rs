@@ -35,8 +35,21 @@ pub fn unknown_subtype(timestamp: u32, mrt_type: u16, subtype: u16) -> MrtRecord
 /// must be 4 bytes; pass 2, 8 or 16 to break it).
 pub fn bgp4mp_wrong_attr_size(timestamp: u32, attr_flags: u8, attr_code: u8, declared_len: u16) -> MrtRecord {
     let value = vec![0xAB; declared_len as usize];
-    let mut attrs = bgp::attr_origin(0);
+    let mut attrs = Vec::new();
+    if attr_code != ATTR_ORIGIN {
+        attrs.extend(bgp::attr_origin(0));
+    }
     attrs.extend(bgp::attribute_declared(attr_flags, attr_code, declared_len, &value));
+    let update = bgp::bgp_update(&[], &attrs, &bgp::nlri_v4([198, 51, 100, 0], 24));
+    records::bgp4mp_message(timestamp, BGP4MP, None, BGP4MP_MESSAGE, 64500, 64501, 1, &[192, 0, 2, 1], &[192, 0, 2, 2], &update)
+}
+
+/// BGP4MP_MESSAGE whose UPDATE first carries a valid ORIGIN and then a second
+/// ORIGIN TLV with the wrong fixed size. This intentionally combines duplicate
+/// well-known attribute handling with malformed fixed-length validation.
+pub fn bgp4mp_duplicate_origin_bad_len(timestamp: u32) -> MrtRecord {
+    let mut attrs = bgp::attr_origin(0);
+    attrs.extend(bgp::attribute_declared(FLAG_TRANSITIVE, ATTR_ORIGIN, 4, &[0xAB; 4]));
     let update = bgp::bgp_update(&[], &attrs, &bgp::nlri_v4([198, 51, 100, 0], 24));
     records::bgp4mp_message(timestamp, BGP4MP, None, BGP4MP_MESSAGE, 64500, 64501, 1, &[192, 0, 2, 1], &[192, 0, 2, 2], &update)
 }

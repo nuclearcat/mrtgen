@@ -1,0 +1,7 @@
+/.git
+/.claude
+/.codex
+/target
+/*.mrt
+/*.manifest.json
+/fatal

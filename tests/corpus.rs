@@ -143,6 +143,7 @@ fn skip_records_include_wrong_tlv_sizes() {
     let corpus = generate(&GeneratorConfig::default());
     for kind in [
         "invalid_attr_origin_len4",
+        "invalid_attr_duplicate_origin_len4",
         "invalid_attr_med_len2",
         "invalid_attr_med_len8",
         "invalid_attr_nexthop_len16",

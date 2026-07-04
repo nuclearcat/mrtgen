@@ -174,3 +174,71 @@ manifest offset/size consistency against the emitted bytes, walkability of
 valid+skip corpora with a reference reader, abort behavior of each fatal
 tail, and full type/subtype coverage. The corpus has additionally been
 cross-validated against the independent `mrtparse` Python parser.
+
+## External parser harness
+
+`tests/parsers/run-docker.sh` builds selected MRT parsers in isolated Docker
+images, generates corpus files under `target/parser-harness/corpus`, and
+mounts that directory read-only into each container. This keeps parser builds
+and package installs out of the host system.
+
+```console
+$ tests/parsers/run-docker.sh
+```
+
+The default run builds and executes:
+
+* `mrtparse` from PyPI
+* `bgpdump` from the Debian package archive
+* `bgpkit-parser` from Cargo with its CLI feature enabled
+
+You can run one parser at a time:
+
+```console
+$ tests/parsers/run-docker.sh mrtparse
+$ tests/parsers/run-docker.sh bgpdump
+$ tests/parsers/run-docker.sh bgpkit-parser
+```
+
+The harness generates both the complete corpus and BGP-family subcorpora for
+parsers that only support the usual MRT BGP types (`TABLE_DUMP`,
+`TABLE_DUMP_V2`, `BGP4MP`, `BGP4MP_ET`):
+
+* `valid.mrt` contains only well-formed standard records and is expected to
+  parse successfully in parsers that support every generated MRT type.
+* `corpus.mrt` contains valid, skip-class malformed, combo, and RFC 7606
+  records.
+* `fatal/*.mrt` appends one abort-class tail per file.
+* `bgp-valid.mrt`, `bgp-corpus.mrt`, and `bgp-fatal/*.mrt` contain only MRT
+  types 12, 13, 16, and 17. The bundled parser runners use these files.
+
+By default, malformed-corpus behavior is reported but not treated as a hard
+failure unless the parser times out or crashes. Use strict mode when you want
+CI to require clean handling of the hostile corpus and fatal tails:
+
+```console
+$ tests/parsers/run-docker.sh --strict
+```
+
+The script runs every selected parser even if one fails, then exits non-zero
+after printing an aggregate failure list.
+
+Some parser failures are useful findings, not harness bugs. For example,
+Debian `bgpdump` 1.6.2 currently aborts on
+`invalid_attr_duplicate_origin_len4`, a skip-class record with a valid ORIGIN
+followed by a second ORIGIN encoded with length 4.
+
+If your network provides an APT cache, pass it without making the Dockerfiles
+network-specific:
+
+```console
+$ MRTGEN_APT_HTTP_PROXY=http://10.255.255.10:3142 tests/parsers/run-docker.sh bgpdump
+```
+
+When unset, Debian-based images use direct APT access. When set, the image
+writes an internal apt config equivalent to:
+
+```text
+Acquire::http::Proxy "http://10.255.255.10:3142";
+Acquire::https::Proxy "DIRECT";
+```
