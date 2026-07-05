@@ -75,6 +75,15 @@ cargo run --quiet -- \
     --manifest "$OUT_DIR/corpus.mrt.manifest.json" \
     --fatal-dir "$OUT_DIR/fatal"
 
+echo "Generating route-list files (all --routes options) for field-level validation"
+cargo run --quiet -- \
+    --routes "$ROOT/tests/parsers/routes-all-options.json" \
+    --out "$OUT_DIR/routes-td2.mrt"
+cargo run --quiet -- \
+    --routes "$ROOT/tests/parsers/routes-all-options.json" \
+    --routes-format bgp4mp \
+    --out "$OUT_DIR/routes-bgp4mp.mrt"
+
 echo "Creating BGP-family subcorpora for parsers that do not support IGP MRT types"
 python3 "$ROOT/tests/parsers/slice-corpus.py" \
     --types 12,13,16,17 \

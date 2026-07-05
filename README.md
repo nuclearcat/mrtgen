@@ -271,6 +271,24 @@ parsers that only support the usual MRT BGP types (`TABLE_DUMP`,
 * `fatal/*.mrt` appends one abort-class tail per file.
 * `bgp-valid.mrt`, `bgp-corpus.mrt`, and `bgp-fatal/*.mrt` contain only MRT
   types 12, 13, 16, and 17. The bundled parser runners use these files.
+* `routes-td2.mrt` and `routes-bgp4mp.mrt` are built from
+  `tests/parsers/routes-all-options.json`, a route list exercising every
+  `--routes` option (both key aliases, defaults, empty AS_PATH, string and
+  numeric origins, MED/LOCAL_PREF extremes, ATOMIC_AGGREGATE, every community
+  syntax including well-known names and raw hex, 2- and 4-byte-AS extended
+  communities, ADD-PATH path ids, and edge prefixes `0.0.0.0/0`, `/32`,
+  `/128`). The mrtparse runner validates these **field by field**: for each
+  record, `routes_mrtparse_check.py` compares the prefix, next hop, AS_PATH,
+  ORIGIN, MED, LOCAL_PREF, ATOMIC_AGGREGATE, all three community families and
+  the Path Identifier that mrtparse decoded against the values promised by
+  the manifest `details`. It can also be run standalone against any directory
+  holding a `routes-td2.mrt` / `routes-bgp4mp.mrt` pair:
+
+  ```console
+  $ python3 tests/parsers/runners/routes_mrtparse_check.py target/parser-harness/corpus
+  routes-td2.mrt: ok; records checked=8
+  routes-bgp4mp.mrt: ok; records checked=7
+  ```
 
 By default, malformed-corpus behavior is reported but not treated as a hard
 failure unless the parser times out or crashes. Use strict mode when you want

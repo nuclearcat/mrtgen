@@ -7,6 +7,8 @@ from pathlib import Path
 
 from mrtparse import Reader
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import routes_mrtparse_check
 
 STRICT = os.environ.get("MRTGEN_STRICT") == "1"
 
@@ -79,6 +81,12 @@ def main():
         report(f"bgp-fatal/{fatal.name}", result, fatal_manifest)
         if STRICT and result["ok"] and result["records_seen"] >= len(fatal_manifest["records"]):
             failures.append(f"mrtparse did not stop before abort tail: {fatal.name}")
+
+    # Route-list mode: field-level cross-check of every --routes option.
+    if (corpus_dir / "routes-td2.mrt").exists():
+        failures.extend(routes_mrtparse_check.check(corpus_dir))
+    else:
+        print("routes-td2.mrt absent; route-list validation skipped")
 
     if failures:
         print("failures:", file=sys.stderr)
