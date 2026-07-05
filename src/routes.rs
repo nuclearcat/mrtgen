@@ -21,9 +21,10 @@
 //! ```
 //!
 //! Only `prefix` and `nexthop` are required; the address family (IPv4/IPv6)
-//! is derived from the prefix and the next hop must match it. Every record
-//! is emitted as `expect: valid` in the manifest, with the route's fields
-//! echoed under `details` so CI can assert the parser recovered them.
+//! is derived from the prefix and the next hop must match it. Route records
+//! default to `expect: valid` in the manifest, with the route's fields echoed
+//! under `details` so CI can assert the parser recovered them. A route can opt
+//! into malformed-but-framed output with `"expect": "skip"`.
 
 use std::net::{Ipv4Addr, Ipv6Addr};
 
@@ -108,6 +109,9 @@ pub struct RouteSpec {
     /// FlowSpec traffic-filtering actions (RFC 8955 section 7), encoded as
     /// extended communities. Requires `flowspec`.
     pub actions: Option<Actions>,
+    /// Manifest expectation for this route. Defaults to `valid`; `skip`
+    /// intentionally emits malformed-but-framed records for parser tests.
+    pub expect: Option<Expect>,
     /// Escape hatch: arbitrary path attributes appended after all built-in
     /// attributes, in the given order. Framing is always honest (the length
     /// field matches the value; the extended-length flag is managed
@@ -200,6 +204,7 @@ struct ParsedRoute {
     flow_nlri: Option<Vec<u8>>,
     /// User-supplied attributes: (flags without the ext-len bit, code, value).
     raw_attrs: Vec<(u8, u8, Vec<u8>)>,
+    expect: Expect,
 }
 
 pub(crate) fn parse_prefix(s: &str) -> Result<(bool, Vec<u8>, u8), String> {
@@ -217,6 +222,24 @@ pub(crate) fn parse_prefix(s: &str) -> Result<(bool, Vec<u8>, u8), String> {
         Ok((true, v6.octets().to_vec(), bits))
     } else {
         Err(format!("prefix '{s}': not a valid IPv4/IPv6 address"))
+    }
+}
+
+pub(crate) fn prefix_has_host_bits(addr: &[u8], bits: u8) -> bool {
+    let whole = bits as usize / 8;
+    let rem = bits % 8;
+    if rem == 0 {
+        return addr[whole..].iter().any(|&b| b != 0);
+    }
+    let host_mask = (1u8 << (8 - rem)) - 1;
+    (addr[whole] & host_mask) != 0 || addr[whole + 1..].iter().any(|&b| b != 0)
+}
+
+fn route_expect(i: usize, r: &RouteSpec) -> Result<Expect, String> {
+    match r.expect.unwrap_or(Expect::Valid) {
+        Expect::Valid => Ok(Expect::Valid),
+        Expect::Skip => Ok(Expect::Skip),
+        Expect::Abort => Err(format!("route {i}: route-list expect may be valid or skip; abort-class records require corpus invalid builders")),
     }
 }
 
@@ -464,14 +487,21 @@ fn parse_raw_attribute(a: &RawAttribute) -> Result<(u8, u8, Vec<u8>), String> {
 
 fn parse_route(i: usize, r: &RouteSpec) -> Result<ParsedRoute, String> {
     let ctx = |e: String| format!("route {i}: {e}");
+    let expect = route_expect(i, r)?;
     let (v6, prefix, bits, flow_nlri) = match (&r.prefix, &r.flowspec) {
         (Some(_), Some(_)) => return Err(ctx("prefix and flowspec are mutually exclusive".into())),
         (None, None) => return Err(ctx("each route needs a prefix or a flowspec rule".into())),
         (Some(pfx), None) => {
             let (v6, p, b) = parse_prefix(pfx).map_err(ctx)?;
+            if expect == Expect::Valid && prefix_has_host_bits(&p, b) {
+                return Err(ctx(format!("prefix '{pfx}' has non-zero host bits; use a network-boundary prefix or set expect to skip")));
+            }
             (v6, p, b, None)
         }
         (None, Some(fs)) => {
+            if expect == Expect::Valid {
+                crate::flowspec::validate_domains(fs).map_err(ctx)?;
+            }
             let (nlri, v6) = crate::flowspec::encode_nlri(fs).map_err(ctx)?;
             (v6, Vec::new(), 0, Some(nlri))
         }
@@ -499,13 +529,17 @@ fn parse_route(i: usize, r: &RouteSpec) -> Result<ParsedRoute, String> {
     if let Some(actions) = &r.actions {
         ext_comms.extend(action_communities(actions).map_err(ctx)?);
     }
+    let as_path = r.as_path.clone().unwrap_or_else(|| vec![64500]);
+    if expect == Expect::Valid && as_path.len() > u8::MAX as usize {
+        return Err(ctx(format!("AS_PATH has {} ASNs, over the 255-AS limit for one AS_SEQUENCE; set expect to skip for the malformed single-segment encoding", as_path.len())));
+    }
     Ok(ParsedRoute {
         v6,
         prefix,
         bits,
         nexthop,
         origin: parse_origin(&r.origin).map_err(ctx)?,
-        as_path: r.as_path.clone().unwrap_or_else(|| vec![64500]),
+        as_path,
         std_comms: r.standard_communities.iter().map(|c| parse_std_community(c)).collect::<Result<_, _>>().map_err(ctx)?,
         aggregator: r.aggregator.as_deref().map(parse_aggregator).transpose().map_err(ctx)?,
         originator_id: r.originator_id.as_deref().map(|s| parse_router_id(s, "originator_id")).transpose().map_err(ctx)?,
@@ -517,6 +551,7 @@ fn parse_route(i: usize, r: &RouteSpec) -> Result<ParsedRoute, String> {
         label,
         flow_nlri,
         raw_attrs: r.raw_attributes.iter().map(parse_raw_attribute).collect::<Result<_, _>>().map_err(ctx)?,
+        expect,
     })
 }
 
@@ -597,6 +632,7 @@ fn route_details(spec: &RouteSpec, p: &ParsedRoute) -> serde_json::Value {
         "nexthop": spec.nexthop,
         "flowspec": spec.flowspec,
         "actions": spec.actions,
+        "expect": p.expect,
         "nlri_hex": p.flow_nlri.as_ref().map(|n| hex(n)),
         "action_ext_communities_hex": spec.actions.as_ref().map(|a| {
             action_communities(a).unwrap_or_default().iter().map(|c| hex(&c[..])).collect::<Vec<_>>()
@@ -635,10 +671,14 @@ pub fn generate_from_routes(routes: &[RouteSpec], format: RouteFormat, base_time
     let mut bytes = Vec::new();
     let mut entries: Vec<RecordEntry> = Vec::new();
     let mut counts = Counts::default();
-    let mut push = |bytes: &mut Vec<u8>, entries: &mut Vec<RecordEntry>, rec: crate::writer::MrtRecord, kind: &str, description: String, details: serde_json::Value| {
+    let mut push = |bytes: &mut Vec<u8>, entries: &mut Vec<RecordEntry>, rec: crate::writer::MrtRecord, kind: &str, expect: Expect, description: String, details: serde_json::Value| {
         let offset = bytes.len() as u64;
         rec.encode_into(bytes);
-        counts.valid += 1;
+        match expect {
+            Expect::Valid => counts.valid += 1,
+            Expect::Skip => counts.skip += 1,
+            Expect::Abort => counts.abort += 1,
+        }
         entries.push(RecordEntry {
             index: entries.len(),
             offset,
@@ -647,7 +687,7 @@ pub fn generate_from_routes(routes: &[RouteSpec], format: RouteFormat, base_time
             subtype: rec.subtype,
             timestamp: rec.timestamp,
             kind: kind.to_string(),
-            expect: Expect::Valid,
+            expect,
             description,
             details,
         });
@@ -668,6 +708,7 @@ pub fn generate_from_routes(routes: &[RouteSpec], format: RouteFormat, base_time
                 &mut entries,
                 records::peer_index_table(base_timestamp, [192, 0, 2, 100], "mrtgen-routes", &peers),
                 "route_peer_index_table",
+                Expect::Valid,
                 "TABLE_DUMP_V2 PEER_INDEX_TABLE for the user route list".into(),
                 json!({"peer_count": 2}),
             );
@@ -720,6 +761,7 @@ pub fn generate_from_routes(routes: &[RouteSpec], format: RouteFormat, base_time
                     &mut entries,
                     rec.0,
                     rec.1,
+                    p.expect,
                     format!("User route {target} via {}", spec.nexthop.as_deref().unwrap_or("-")),
                     route_details(spec, p),
                 );
@@ -777,6 +819,7 @@ pub fn generate_from_routes(routes: &[RouteSpec], format: RouteFormat, base_time
                     &mut entries,
                     records::bgp4mp_message(ts, BGP4MP, None, subtype, peer_as, 64511, 1, &peer_ip, &local_ip, &update),
                     kind,
+                    p.expect,
                     if p.flow_nlri.is_some() {
                         "BGP UPDATE announcing a FlowSpec rule (SAFI 133) via MP_REACH_NLRI".to_string()
                     } else {
@@ -1038,12 +1081,69 @@ mod tests {
             (r#"[{"flowspec":{"protocol":[6]},"rd":"64500:1"}]"#, "cannot be combined with flowspec"),
             (r#"[{"flowspec":{"protocol":[6]},"actions":{"traffic_marking":64}}]"#, "exceeds 63"),
             (r#"[{"flowspec":{"protocol":[6]},"actions":{"rate_limit_bytes":-1}}]"#, "non-negative"),
+            (r#"[{"flowspec":{"protocol":[256]}}]"#, "flowspec protocol"),
+            (r#"[{"flowspec":{"dscp":[64]}}]"#, "flowspec dscp"),
+            (r#"[{"flowspec":{"afi":"ipv6","flow_label":[1048576]}}]"#, "flowspec flow_label"),
+            (r#"[{"flowspec":{"dst_prefix":"192.0.2.129/25"}}]"#, "non-zero host bits"),
         ];
         for (json, needle) in cases {
             let routes = routes_from_json(json).unwrap();
             let err = generate_from_routes(&routes, RouteFormat::Bgp4mp, 0).unwrap_err();
             assert!(err.contains(needle), "expected '{needle}' in: {err}");
         }
+    }
+
+    #[test]
+    fn explicit_skip_routes_may_emit_malformed_but_framed_records() {
+        let routes = routes_from_json(r#"[{"expect":"skip","flowspec":{"afi":"ipv6","flow_label":[1048576]}}]"#).unwrap();
+        let corpus = generate_from_routes(&routes, RouteFormat::Bgp4mp, 0).unwrap();
+        assert_eq!(corpus.manifest.counts.valid, 0);
+        assert_eq!(corpus.manifest.counts.skip, 1);
+        assert_eq!(corpus.manifest.records[0].expect, Expect::Skip);
+        assert_eq!(corpus.manifest.records[0].details["expect"], "skip");
+        assert!(corpus.manifest.records[0].details["nlri_hex"].as_str().unwrap().contains("00100000"));
+
+        let routes = routes_from_json(r#"[{"expect":"skip","prefix":"192.0.2.129/25","nexthop":"1.1.1.1"}]"#).unwrap();
+        let corpus = generate_from_routes(&routes, RouteFormat::Bgp4mp, 0).unwrap();
+        assert_eq!(corpus.manifest.records[0].expect, Expect::Skip);
+        assert!(corpus.bytes.windows([25, 192, 0, 2, 129].len()).any(|w| w == [25, 192, 0, 2, 129]));
+    }
+
+    #[test]
+    fn route_list_valid_routes_reject_malformed_as_path_and_prefixes() {
+        let asns = (0..=255).map(|n| 64500 + n).collect::<Vec<u32>>();
+        let json = serde_json::json!([{
+            "prefix": "1.2.3.0/24",
+            "nexthop": "1.1.1.1",
+            "as_path": asns,
+        }])
+        .to_string();
+        let routes = routes_from_json(&json).unwrap();
+        let err = generate_from_routes(&routes, RouteFormat::Bgp4mp, 0).unwrap_err();
+        assert!(err.contains("AS_PATH has 256 ASNs"), "{err}");
+
+        let routes = routes_from_json(r#"[{"prefix":"192.0.2.129/25","nexthop":"1.1.1.1"}]"#).unwrap();
+        let err = generate_from_routes(&routes, RouteFormat::Bgp4mp, 0).unwrap_err();
+        assert!(err.contains("non-zero host bits"), "{err}");
+    }
+
+    #[test]
+    fn explicit_skip_routes_may_emit_malformed_as_path() {
+        let asns = (0..=255).map(|n| 64500 + n).collect::<Vec<u32>>();
+        let json = serde_json::json!([{
+            "expect": "skip",
+            "prefix": "1.2.3.0/24",
+            "nexthop": "1.1.1.1",
+            "as_path": asns,
+        }])
+        .to_string();
+        let routes = routes_from_json(&json).unwrap();
+        let corpus = generate_from_routes(&routes, RouteFormat::Bgp4mp, 0).unwrap();
+        assert_eq!(corpus.manifest.records[0].expect, Expect::Skip);
+        assert_eq!(corpus.manifest.counts.skip, 1);
+        // AS_PATH attribute: flags, code, ext-len flag with 1026-byte value,
+        // then one AS_SEQUENCE whose count wrapped to zero.
+        assert!(corpus.bytes.windows([0x50, ATTR_AS_PATH, 0x04, 0x02, 2, 0].len()).any(|w| w == [0x50, ATTR_AS_PATH, 0x04, 0x02, 2, 0]));
     }
 
     #[test]

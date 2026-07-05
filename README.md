@@ -137,6 +137,7 @@ the prefix and the next hop must match it. Optional fields per route:
 | `label`                | u32 MPLS label (< 2^20) for the VPN NLRI; requires `rd`              | `0`       |
 | `flowspec`             | FlowSpec rule object (see below); replaces `prefix`                  | —         |
 | `actions`              | FlowSpec traffic-filtering actions (see below); requires `flowspec`  | omitted   |
+| `expect`               | manifest expectation: `"valid"` or `"skip"`; `skip` intentionally emits malformed-but-framed route records | `"valid"` |
 | `raw_attributes`       | escape hatch: `[{"flags": 192 or ["optional","transitive","partial"], "code": 99, "value_hex": "deadbeef"}]`, appended after all built-in attributes with honest framing (extended-length handled automatically); duplicating a code is allowed deliberately | omitted |
 
 Two encodings via `--routes-format`:
@@ -190,9 +191,14 @@ communities under `details.action_ext_communities_hex`; the NLRI encoder is
 unit-tested against the worked examples in RFC 8955 section 4.3.
 
 Unknown JSON keys are rejected so typos fail loudly. Output is deterministic
-and comes with the same manifest as corpus mode: every record is
-`expect: valid` and `details` echoes the route's fields for CI assertions.
-The library entry points are `routes_from_json()` and `generate_from_routes()`.
+and comes with the same manifest as corpus mode: route records default to
+`expect: valid`, and `details` echoes the route's fields for CI assertions.
+Valid route records reject non-canonical prefixes, FlowSpec values outside
+their component domain, and AS_PATH lists that do not fit one AS_SEQUENCE.
+Set `"expect": "skip"` on an individual route to intentionally emit these
+malformed-but-framed encodings for parser tests; `abort` is not supported in
+route-list mode. The library entry points are `routes_from_json()` and
+`generate_from_routes()`.
 
 Parser-support caveats (reflected in the harness checks): mrtparse decodes
 SAFI-128 UPDATEs fully but cannot walk TABLE_DUMP_V2 RIB_GENERIC VPN records,

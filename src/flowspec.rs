@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::routes::parse_prefix;
+use crate::routes::{parse_prefix, prefix_has_host_bits};
 
 // Component type codes (RFC 8955 section 4.2.2, RFC 8956 section 3).
 const T_DST_PREFIX: u8 = 1;
@@ -200,6 +200,46 @@ fn numeric_pairs(item: &NumericMatch, what: &str) -> Result<Vec<(u8, u64)>, Stri
         n if n != expected => Err(format!("{what}: give one operator per list item (items are ORed; use range for an interval)")),
         _ => Ok(pairs),
     }
+}
+
+fn validate_numeric_max(items: &[NumericMatch], what: &str, max: u64) -> Result<(), String> {
+    for item in items {
+        for (_, value) in numeric_pairs(item, what)? {
+            if value > max {
+                return Err(format!("{what}: value {value} exceeds {max}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_prefix(spec: &str, what: &str) -> Result<(), String> {
+    let (_, addr, bits) = parse_prefix(spec)?;
+    if prefix_has_host_bits(&addr, bits) {
+        return Err(format!("{what}: prefix '{spec}' has non-zero host bits"));
+    }
+    Ok(())
+}
+
+/// Validate FlowSpec component values whose wire encoding is intentionally
+/// generic but whose actual field domains are narrower.
+pub fn validate_domains(fs: &FlowSpec) -> Result<(), String> {
+    if let Some(p) = &fs.dst_prefix {
+        validate_prefix(p, "flowspec dst_prefix")?;
+    }
+    if let Some(p) = &fs.src_prefix {
+        validate_prefix(p, "flowspec src_prefix")?;
+    }
+    validate_numeric_max(&fs.protocol, "flowspec protocol", u8::MAX as u64)?;
+    validate_numeric_max(&fs.port, "flowspec port", u16::MAX as u64)?;
+    validate_numeric_max(&fs.dst_port, "flowspec dst_port", u16::MAX as u64)?;
+    validate_numeric_max(&fs.src_port, "flowspec src_port", u16::MAX as u64)?;
+    validate_numeric_max(&fs.icmp_type, "flowspec icmp_type", u8::MAX as u64)?;
+    validate_numeric_max(&fs.icmp_code, "flowspec icmp_code", u8::MAX as u64)?;
+    validate_numeric_max(&fs.packet_length, "flowspec packet_length", u16::MAX as u64)?;
+    validate_numeric_max(&fs.dscp, "flowspec dscp", 63)?;
+    validate_numeric_max(&fs.flow_label, "flowspec flow_label", 0x000f_ffff)?;
+    Ok(())
 }
 
 /// Encode a numeric-operator component: type octet + {op, value} list.
